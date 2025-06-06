@@ -5,8 +5,10 @@ import geopandas as gpd
 import shapely
 from shapely.geometry import Polygon, Point
 import shapely.wkt
-from ETtoolbox.transform.UTM import UTM_proj4_from_latlon
+
 import rasters as rt
+
+from .UTM import UTM_proj4_from_latlon
 
 def pathdotrow(tile: str) -> str:
     tile = str(tile)
