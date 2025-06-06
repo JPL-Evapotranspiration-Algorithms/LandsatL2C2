@@ -28,7 +28,7 @@ import rasters as rt
 from rasters import RasterGrid, Raster, RasterGeometry
 
 from .EEAPI import EEAPI
-from .WRS2 import WRS2Descending
+from .WRS2Descending import WRS2Descending
 
 WRS2_FILENAME = join(abspath(dirname(__file__)), "WRS2_descending_centroids.geojson")
 
