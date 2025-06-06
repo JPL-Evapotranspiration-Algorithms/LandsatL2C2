@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LandsatL2C2"
-version = "1.0.1"
+version = "1.0.2"
 description = "Landsat Level 2 Collection 2 Search & Download Utility"
 readme = "README.md"
 authors = [
