@@ -38,7 +38,7 @@ class EEAPI:
 
     _M2MHOST = "https://m2m.cr.usgs.gov/api/api/json/stable/"
     _DEFAULT_MAX_RESULTS = 1000
-    _LOGIN_ENDPOINT = "login"
+    _LOGIN_ENDPOINT = "login-token"
     _LOGOUT_ENDPOINT = "logout"
     _SCENE_SEARCH_ENDPOINT = "scene-search"
     _DOWNLOAD_OPTIONS_ENDPOINT = "download-options"
@@ -50,19 +50,27 @@ class EEAPI:
             self,
             username: str = None,
             password: str = None,
+            token: str = None,
             API_key: str = None,
             host_URL: str = None,
             download_directory: str = None):
         if host_URL is None:
             host_URL = self._M2MHOST
 
-        if username is None or password is None:
+        # Get credentials if not provided
+        if username is None or (password is None and token is None):
             credentials = get_M2M_credentials()
-            username = credentials["username"]
-            password = credentials["password"]
+            if username is None:
+                username = credentials["username"]
+            if password is None and token is None:
+                # Try to get token first, fall back to password
+                token = credentials.get("token")
+                if token is None:
+                    password = credentials.get("password")
 
         self._username = username
         self._password = password
+        self._token = token
         self._API_key = API_key
 
         self.host_URL = host_URL
@@ -165,10 +173,18 @@ class EEAPI:
         return urljoin(self.host_URL, self._LOGIN_ENDPOINT)
 
     def login(self):
-        request_dict = {
-            "username": self._username,
-            "password": self._password
-        }
+        # Use token-based authentication if token is available, otherwise fall back to username/password
+        if self._token:
+            request_dict = {
+                "username": self._username,
+                "token": self._token
+            }
+        else:
+            # This is the legacy method - may not work with newer API versions
+            request_dict = {
+                "username": self._username,
+                "password": self._password
+            }
 
         URL = self.login_URL
         self._API_key = self.request(URL, request_dict)

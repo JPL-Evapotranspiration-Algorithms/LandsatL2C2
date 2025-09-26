@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LandsatL2C2"
-version = "1.0.3"
+version = "1.1.0"
 description = "Landsat Level 2 Collection 2 Search & Download Utility"
 readme = "README.md"
 authors = [
@@ -39,7 +39,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-LandsatL2C2 = ["*.txt", "*.geojson"]
+LandsatL2C2 = ["*.geojson"]
 
 [project.urls]
 Homepage = "https://github.com/JPL-Evapotranspiration-Algorithms/LandsatL2C2"
@@ -47,3 +47,6 @@ Homepage = "https://github.com/JPL-Evapotranspiration-Algorithms/LandsatL2C2"
 [tool.setuptools.packages.find]
 include = ["LandsatL2C2"]
 exclude = ["calval", "testing"]
+
+[project.scripts]
+LandsatL2C2-credentials = "LandsatL2C2.M2M_credentials:main"
