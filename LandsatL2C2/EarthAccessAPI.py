@@ -53,7 +53,7 @@ class EarthAccessAPI:
     def __init__(
             self,
             download_directory: str = None,
-            authentication_strategy: str = "interactive"):
+            authentication_strategy: str = "netrc"):
         """
         Initialize EarthAccess API client.
         
@@ -173,7 +173,8 @@ class EarthAccessAPI:
             bounds = target_geometry.bounds
             bounding_box = (bounds[0], bounds[1], bounds[2], bounds[3])  # (west, south, east, north)
         elif isinstance(target_geometry, RasterGrid):
-            x_min, y_min, x_max, y_max = target_geometry.bbox_latlon
+            # x_min, y_min, x_max, y_max = target_geometry.bbox_latlon 
+            x_min, y_min, x_max, y_max = target_geometry.bbox.latlon
             bounding_box = (x_min, y_min, x_max, y_max)
         else:
             raise ValueError("Unsupported geometry type for earthaccess search")
