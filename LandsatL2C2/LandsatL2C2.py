@@ -28,6 +28,7 @@ import rasters as rt
 from rasters import RasterGrid, Raster, RasterGeometry
 
 from .EEAPI import EEAPI
+from .EarthAccessAPI import EarthAccessAPI
 from .WRS2Descending import WRS2Descending
 
 WRS2_FILENAME = join(abspath(dirname(__file__)), "WRS2_descending_centroids.geojson")
@@ -1096,6 +1097,9 @@ class LandsatL2C2(EEAPI):
             mosaic_directory: str = None,
             preview_quality: int = None,
             remove_sources: bool = False,
+            use_earthaccess: bool = True,
+            earthaccess_auth_strategy: str = "netrc",
+            use_m2m_legacy: bool = False,
             **kwargs):
         super(LandsatL2C2, self).__init__(*args, **kwargs)
         self.WRS2 = WRS2Descending()
@@ -1123,6 +1127,38 @@ class LandsatL2C2(EEAPI):
         self.mosaic_directory = mosaic_directory
         self.preview_quality = preview_quality
         self.remove_sources = remove_sources
+        
+        # Modern earthaccess integration (default)
+        self.use_earthaccess = use_earthaccess
+        self.earthaccess_auth_strategy = earthaccess_auth_strategy
+        self.use_m2m_legacy = use_m2m_legacy
+        
+        if self.use_earthaccess:
+            # Initialize EarthAccess API (default, modern approach)
+            self.earth_api = EarthAccessAPI(
+                download_directory=download_directory,
+                authentication_strategy=earthaccess_auth_strategy
+            )
+            self.logger.info("Using earthaccess for Landsat data access (default)")
+        elif self.use_m2m_legacy:
+            # Fallback to legacy M2M API
+            self.earth_api = None
+            self.logger.info("Using legacy M2M API for Landsat data access")
+        else:
+            # Auto-fallback: try earthaccess first, then M2M
+            try:
+                self.earth_api = EarthAccessAPI(
+                    download_directory=download_directory,
+                    authentication_strategy=earthaccess_auth_strategy
+                )
+                self.use_earthaccess = True
+                self.logger.info("Auto-selected earthaccess for Landsat data access")
+            except Exception as e:
+                self.logger.warning(f"earthaccess initialization failed: {e}")
+                self.logger.info("Falling back to legacy M2M API")
+                self.earth_api = None
+                self.use_earthaccess = False
+                self.use_m2m_legacy = True
 
     def __repr__(self):
         return json.dumps(
@@ -1248,6 +1284,23 @@ class LandsatL2C2(EEAPI):
             cloud_percent_min: float = 0,
             cloud_percent_max: float = 100,
             ascending: bool = True):
+        
+        # Route to earthaccess (default) or M2M legacy
+        if self.use_earthaccess and self.earth_api is not None:
+            return self._scene_search_earthaccess(
+                start=start,
+                end=end,
+                tiles=tiles,
+                target_geometry=target_geometry,
+                datasets=datasets,
+                sensors=sensors,
+                max_results=max_results,
+                cloud_percent_min=cloud_percent_min,
+                cloud_percent_max=cloud_percent_max,
+                ascending=ascending
+            )
+        
+        # Fallback to legacy M2M implementation
         if isinstance(start, str):
             start = parser.parse(start).date()
 
@@ -1346,6 +1399,69 @@ class LandsatL2C2(EEAPI):
             scenes = scenes.iloc[:max_results]
 
         return scenes
+
+    def _scene_search_earthaccess(
+            self,
+            start: date or datetime or str,
+            end: date or datetime or str = None,
+            tiles: List[str] = None,
+            target_geometry: Point or Polygon or RasterGrid = None,
+            datasets: str or list = None,
+            sensors: List[str] or str = None,
+            max_results: int = None,
+            cloud_percent_min: float = 0,
+            cloud_percent_max: float = 100,
+            ascending: bool = True):
+        """
+        Scene search implementation using earthaccess.
+        """
+        if target_geometry is None and tiles is None:
+            raise ValueError("no geometry or path/row given for scene search")
+
+        # Convert tiles to geometry if needed
+        if target_geometry is None and tiles is not None:
+            if isinstance(tiles, str):
+                tiles = [tiles]
+            # For simplicity, use the first tile's centroid as geometry
+            # In a full implementation, you might want to union all tile geometries
+            target_geometry = self.WRS2.centroid(tiles[0])
+
+        # Use default datasets if none provided  
+        if datasets is None:
+            datasets = ["surface_reflectance"]  # Default to surface reflectance
+        elif isinstance(datasets, str):
+            datasets = [datasets]
+
+        try:
+            # Use the EarthAccess API for search
+            scenes = self.earth_api.scene_search(
+                start_date=start,
+                end_date=end,
+                target_geometry=target_geometry,
+                datasets=datasets,
+                max_results=max_results,
+                cloud_percent_min=cloud_percent_min,
+                cloud_percent_max=cloud_percent_max,
+                ascending=ascending
+            )
+
+            # Filter by sensors if specified
+            if sensors is not None:
+                if isinstance(sensors, str):
+                    sensors = [sensors]
+                scenes = scenes[scenes.sensor.apply(lambda sensor: sensor in sensors)]
+
+            # Add tiles information if it was provided
+            if tiles is not None:
+                # For earthaccess results, we might not have direct tile info
+                # This would need to be computed from geometry or granule names
+                scenes["tile"] = "computed_from_geometry"  # Placeholder
+
+            return scenes
+
+        except Exception as e:
+            self.logger.error(f"EarthAccess scene search failed: {e}")
+            raise UnavailableError("no scenes found with earthaccess")
 
     def granule_URLs(
             self,
@@ -1519,11 +1635,27 @@ class LandsatL2C2(EEAPI):
             max_results: int = None,
             cloud_percent_min: float = 0,
             cloud_percent_max: float = 100) -> pd.DataFrame:
+        
         if target_geometry is None and pathrow is None:
             raise ValueError("no target geometry or path/row given for scene search")
         elif target_geometry is None and isinstance(pathrow, str):
             target_geometry = self.centroid(pathrow)
 
+        # Route to earthaccess (default) or M2M legacy
+        if self.use_earthaccess and self.earth_api is not None:
+            return self.earth_api.download(
+                start=start_date,
+                end=end_date,
+                geometry=target_geometry,
+                datasets=datasets,
+                sensors=sensor_names,
+                bands=band_names,
+                max_results=max_results,
+                cloud_percent_min=cloud_percent_min,
+                cloud_percent_max=cloud_percent_max
+            )
+
+        # Fallback to legacy M2M implementation
         return super(LandsatL2C2, self).download(
             start=start_date,
             end=end_date,

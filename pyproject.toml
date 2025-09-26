@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LandsatL2C2"
-version = "1.0.3"
-description = "Landsat Level 2 Collection 2 Search & Download Utility"
+version = "2.0.0"
+description = "Landsat Level 2 Collection 2 Search & Download Utility with earthaccess integration"
 readme = "README.md"
 authors = [
     { name = "Gregory H. Halverson", email = "gregory.h.halverson@jpl.nasa.gov" },
@@ -16,6 +16,7 @@ classifiers = [
 ]
 dependencies = [
     "colored-logging",
+    "earthaccess",
     "geopandas",
     "matplotlib",
     "pandas",

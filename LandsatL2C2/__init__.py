@@ -1,4 +1,7 @@
 from .LandsatL2C2 import *
+from .EarthAccessAPI import EarthAccessAPI
+
+from os.path import join, abspath, dirname
 
 with open(join(abspath(dirname(__file__)), "version.txt")) as f:
     version = f.read()
