@@ -32,7 +32,7 @@ def decode_credentials(credential_text: str) -> Dict[str, str]:
 def read_credentials(filename: str) -> Dict[str, str]:
     filename = abspath(expanduser(filename))
 
-    print(f"reading credential file: {filename}")
+    # print(f"reading credential file: {filename}")
 
     with open(filename, "r") as file:
         encoded = file.read()
