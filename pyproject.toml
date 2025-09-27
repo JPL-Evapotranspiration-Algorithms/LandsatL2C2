@@ -37,6 +37,10 @@ dev = [
     "pytest",
     "twine"
 ]
+s3 = [
+    "boto3",
+    "pystac-client"
+]
 
 [tool.setuptools.package-data]
 LandsatL2C2 = ["*.txt", "*.geojson"]

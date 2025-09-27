@@ -29,6 +29,7 @@ from rasters import RasterGrid, Raster, RasterGeometry
 
 from .EEAPI import EEAPI
 from .WRS2Descending import WRS2Descending
+from .backends import create_backend, LandsatBackend, M2MBackend, S3Backend
 
 WRS2_FILENAME = join(abspath(dirname(__file__)), "WRS2_descending_centroids.geojson")
 
@@ -306,20 +307,44 @@ class LandsatL2C2Granule(object):
 
     def __init__(
             self,
-            filename: str,
+            filename: str = None,
+            scene_id: str = None,
+            backend: LandsatBackend = None,
             products_directory: str = None,
-            preview_quality: int = None):
-        self._filename = filename
-
-        if self.istar:
-            with tarfile.TarFile(self.path) as tar:
-                self._metadata = MTL(tar.extractfile(tar.getmember(self.metadata_filename)).read())
-        elif self.isdir:
-            self._metadata = MTL(self.metadata_filepath)
+            preview_quality: int = None,
+            bands: List[str] = None):
+        
+        # Support both file-based and S3-based granules
+        if filename is not None:
+            # File-based granule (existing functionality)
+            self._filename = filename
+            self.scene_id = None
+            self.backend = None
+            self.is_s3 = False
+            
+            if self.istar:
+                with tarfile.TarFile(self.path) as tar:
+                    self._metadata = MTL(tar.extractfile(tar.getmember(self.metadata_filename)).read())
+            elif self.isdir:
+                self._metadata = MTL(self.metadata_filepath)
+            else:
+                raise ValueError("unrecognized granule filename '{}'".format(filename))
+                
+            self.tags = parse_landsat_ID(self.ID)
+            
+        elif scene_id is not None and backend is not None:
+            # S3-based granule
+            self._filename = None
+            self.scene_id = scene_id
+            self.backend = backend
+            self.is_s3 = True
+            self._metadata = None  # S3 granules don't load metadata by default
+            self.tags = parse_landsat_ID(scene_id)
+            self.available_bands = bands or []
+            
         else:
-            raise ValueError("unrecognized granule filename '{}'".format(filename))
-
-        self.tags = parse_landsat_ID(self.ID)
+            raise ValueError("Must provide either filename or (scene_id and backend)")
+        
         self._rasterio_profile = None
         self._cloud = None
         self._water = None
@@ -665,7 +690,26 @@ class LandsatL2C2Granule(object):
         if isinstance(band, int):
             band = f"SR_B{band}"
 
-        if self.isdir:
+        if self.is_s3:
+            # S3 backend - load from cloud
+            try:
+                with self.backend.get_band_data(self.scene_id, band) as src:
+                    # Read the data
+                    data = src.read(1)
+                    
+                    # Create Raster object with proper geospatial info
+                    image = Raster(
+                        array=data,
+                        crs=src.crs,
+                        affine=src.transform,
+                        nodata=src.nodata
+                    )
+                    return image
+            except Exception as e:
+                self.logger.error(f"Failed to load band {band} from S3: {e}")
+                raise
+        
+        elif self.isdir:
             filename = self.band_filepath(band)
             image = Raster.open(filename)
 
@@ -1072,7 +1116,7 @@ class LandsatL2C2Granule(object):
         return albedo
 
 
-class LandsatL2C2(EEAPI):
+class LandsatL2C2:
     _LANDSAT_COLLECTION_2_DATASETS = (
         "landsat_tm_c2_l2",
         "landsat_etm_c2_l2",
@@ -1089,7 +1133,9 @@ class LandsatL2C2(EEAPI):
 
     def __init__(
             self,
-            *args,
+            backend: str = "auto",
+            username: str = None,
+            password: str = None,
             working_directory: str = None,
             download_directory: str = None,
             products_directory: str = None,
@@ -1097,8 +1143,20 @@ class LandsatL2C2(EEAPI):
             preview_quality: int = None,
             remove_sources: bool = False,
             **kwargs):
-        super(LandsatL2C2, self).__init__(*args, **kwargs)
+        
+        # Initialize backend
+        self.backend = create_backend(
+            backend_type=backend,
+            username=username,
+            password=password,
+            **kwargs
+        )
+        
+        # Initialize WRS2 grid system
         self.WRS2 = WRS2Descending()
+        
+        # Store backend type for compatibility methods
+        self._backend_type = backend
 
         if working_directory is None:
             working_directory = self._DEFAULT_WORKING_DIRECTORY
@@ -1127,14 +1185,47 @@ class LandsatL2C2(EEAPI):
     def __repr__(self):
         return json.dumps(
             {
-                "host": self.host_URL,
-                "key": self.API_key,
+                "backend_type": self._backend_type,
                 "download_directory": self.download_directory,
                 "products_directory": self.products_directory,
                 "mosaic_directory": self.mosaic_directory
             },
             indent=2
         )
+    
+    # Compatibility methods for M2M backend
+    def __enter__(self):
+        if isinstance(self.backend, M2MBackend):
+            self.backend.__enter__()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if isinstance(self.backend, M2MBackend):
+            self.backend.__exit__(exc_type, exc_val, exc_tb)
+    
+    def login(self):
+        """Login method for M2M backend compatibility"""
+        if isinstance(self.backend, M2MBackend):
+            self.backend.login()
+    
+    def logout(self):
+        """Logout method for M2M backend compatibility"""
+        if isinstance(self.backend, M2MBackend):
+            self.backend.logout()
+    
+    @property
+    def host_URL(self):
+        """Compatibility property for M2M backend"""
+        if isinstance(self.backend, M2MBackend):
+            return self.backend.eeapi.host_URL
+        return "S3 Backend"
+    
+    @property  
+    def API_key(self):
+        """Compatibility property for M2M backend"""
+        if isinstance(self.backend, M2MBackend):
+            return self.backend.eeapi._API_key
+        return None
 
     def date_directory(self, dataset: str, date_UTC: date) -> str:
         return join(self.download_directory, f"{date_UTC:%Y-%m-%d}")
@@ -1248,26 +1339,26 @@ class LandsatL2C2(EEAPI):
             cloud_percent_min: float = 0,
             cloud_percent_max: float = 100,
             ascending: bool = True):
+        
+        # Parse dates
         if isinstance(start, str):
             start = parser.parse(start).date()
-
         if isinstance(end, str):
             end = parser.parse(end).date()
+        if end is None:
+            end = start
 
+        # Handle geometry and tiles
         if target_geometry is None and tiles is None:
             raise ValueError("no geometry or path/row given for scene search")
 
-        # print(type(target_geometry))
-
+        # Convert shapely geometries to rasters format if needed
         if isinstance(target_geometry, shapely.geometry.point.Point):
             target_geometry = rt.Point(target_geometry)
-
         if isinstance(target_geometry, shapely.geometry.polygon.Polygon):
             target_geometry = rt.Polygon(target_geometry)
 
-        # print(type(target_geometry))
-        # print(isinstance(target_geometry, rt.Polygon))
-
+        # Get target vector for WRS2 tile calculation
         if isinstance(target_geometry, rt.Point) or isinstance(target_geometry, rt.Polygon):
             target_vector = target_geometry
         elif isinstance(target_geometry, RasterGeometry):
@@ -1275,73 +1366,115 @@ class LandsatL2C2(EEAPI):
         elif tiles is None:
             raise ValueError("no target vector")
 
+        # Get WRS2 tiles if not provided
         if tiles is None and target_geometry is not None:
             tiles = self.WRS2.tiles(target_vector, eliminate_redundancy=True).tile
             self.logger.info("Landsat path/row tiles: " + colored_logging.place(', '.join(tiles)))
 
         if isinstance(tiles, str):
             tiles = [tiles]
-
         if isinstance(sensors, str):
             sensors = [sensors]
 
-        if datasets is None:
-            datasets = self.collection_2_datasets(start=start, end=end, sensors=sensors)
-        elif isinstance(datasets, str):
-            datasets = [datasets]
+        # Use backend for search
+        if isinstance(self.backend, M2MBackend):
+            # M2M backend - use existing logic with modifications
+            if datasets is None:
+                datasets = self.collection_2_datasets(start=start, end=end, sensors=sensors)
+            elif isinstance(datasets, str):
+                datasets = [datasets]
 
-        # scenes = None
-        scenes = []
+            scenes = []
+            for dataset in datasets:
+                for tile in tiles:
+                    self.logger.info(
+                        f"searching dataset {colored_logging.val(dataset)} tile {colored_logging.place(tile)}" +
+                        " from " + colored_logging.time(f"{start:%Y-%m-%d}") +
+                        " to " + colored_logging.time(f"{end:%Y-%m-%d}")
+                    )
 
-        for dataset in datasets:
-            for tile in tiles:
-                self.logger.info(
-                    f"searching dataset {colored_logging.val(dataset)} tile {colored_logging.place(tile)}" +
-                    " from " + colored_logging.time(f"{start:%Y-%m-%d}") +
-                    " to " + colored_logging.time(f"{end:%Y-%m-%d}")
-                )
+                    # Use M2M backend
+                    search_results = self.backend.scene_search(
+                        start_date=start,
+                        end_date=end,
+                        target_geometry=self.WRS2.centroid(tile),
+                        collections=[dataset],
+                        cloud_percent_max=cloud_percent_max,
+                        max_results=max_results
+                    )
 
-                search_results = super(LandsatL2C2, self).scene_search(
-                    start_date=start,
-                    end_date=end,
-                    target_geometry=self.WRS2.centroid(tile),
-                    datasets=dataset,
-                    max_results=max_results,
-                    cloud_percent_min=cloud_percent_min,
-                    cloud_percent_max=cloud_percent_max,
-                    ascending=ascending
-                )
+                    if not search_results.empty:
+                        self.logger.info(f"found {colored_logging.val(len(search_results))} scenes")
+                        search_results["dataset"] = dataset
+                        scenes.append(search_results)
 
-                self.logger.info(f"found {colored_logging.val(len(search_results))} scenes")
+            if scenes:
+                scenes = pd.concat(scenes, ignore_index=True)
+            else:
+                scenes = pd.DataFrame()
+                
+        else:
+            # S3 backend - use STAC search
+            # Convert tiles to geometry for S3 search
+            if tiles:
+                geometries = []
+                for tile in tiles:
+                    tile_geom = self.WRS2.polygon(tile)
+                    geometries.append(tile_geom)
+                
+                if len(geometries) == 1:
+                    search_geometry = geometries[0]
+                else:
+                    from shapely.ops import unary_union
+                    search_geometry = unary_union(geometries)
+            else:
+                search_geometry = target_geometry
 
-                search_results["dataset"] = dataset
+            # Map dataset names to STAC collections
+            collections = ["landsat-c2l2-sr"] if datasets is None else datasets
+            if isinstance(collections, str):
+                collections = [collections]
 
-                # if scenes is None:
-                #     scenes = search_results
-                # elif len(search_results) > 0:
-                #     # FIXME replace deprecated append with concat
-                #     scenes = scenes.append(search_results)
+            self.logger.info(
+                f"searching S3 backend from {colored_logging.time(f'{start:%Y-%m-%d}')} " +
+                f"to {colored_logging.time(f'{end:%Y-%m-%d}')}"
+            )
 
-                scenes.append(search_results)
+            scenes = self.backend.scene_search(
+                start_date=start,
+                end_date=end,
+                target_geometry=search_geometry,
+                collections=collections,
+                cloud_percent_max=cloud_percent_max,
+                max_results=max_results
+            )
 
-        scenes = pd.concat(scenes)
+            if not scenes.empty:
+                self.logger.info(f"found {colored_logging.val(len(scenes))} scenes")
 
-        if len(scenes) == 0:
+        # Post-process results
+        if scenes.empty:
             raise UnavailableError("no scenes found")
 
-        geometry = scenes.pop("geometry")
-        scenes["sensor"] = scenes.display_ID.apply(lambda display_ID: display_ID.split("_")[0])
-        scenes["tile"] = scenes.display_ID.apply(lambda display_ID: display_ID.split("_")[2])
-        scenes["date_UTC"] = scenes.display_ID.apply(lambda display_ID: parser.parse(display_ID.split("_")[3]).date())
-        scenes["granule_ID"] = scenes["display_ID"]
-        scenes = gpd.GeoDataFrame(scenes, geometry=geometry, crs="EPSG:4326")
+        # Add derived columns if not present
+        if "sensor" not in scenes.columns:
+            scenes["sensor"] = scenes.display_ID.apply(lambda display_ID: display_ID.split("_")[0])
+        if "tile" not in scenes.columns:
+            scenes["tile"] = scenes.display_ID.apply(lambda display_ID: display_ID.split("_")[2])
+        if "granule_ID" not in scenes.columns:
+            scenes["granule_ID"] = scenes["display_ID"]
 
+        # Filter by sensors if specified
         if sensors is not None:
             scenes = scenes[scenes.sensor.apply(lambda sensor: sensor in sensors)]
 
-        scenes = scenes[scenes.date_UTC.apply(lambda date_UTC: date_UTC >= start or date_UTC <= end)]
+        # Filter by date range
+        scenes = scenes[scenes.date_UTC.apply(lambda date_UTC: start <= date_UTC <= end)]
+        
+        # Sort results
         scenes = scenes.sort_values(by=["date_UTC", "display_ID"], ascending=ascending)
 
+        # Limit results
         if max_results is not None:
             scenes = scenes.iloc[:max_results]
 
@@ -1488,22 +1621,27 @@ class LandsatL2C2(EEAPI):
             bands = [self.translate_band_name(band, dataset) for band in bands]
             self.logger.info(f"retrieving Landsat L2 C2 granule: {colored_logging.name(granule_ID)} bands: {', '.join(bands)}")
 
-        directory = super(LandsatL2C2, self).retrieve_granule(
-            dataset=dataset,
-            date_UTC=date_UTC,
-            granule_ID=granule_ID,
-            entity_ID=entity_ID,
-            bands=bands
-        )
+        if isinstance(self.backend, M2MBackend):
+            # M2M backend - download to local directory
+            directory = self.backend.download_granule(granule_ID, self.download_directory)
+            
+            if directory is None:
+                return None
 
-        if directory is None:
-            return None
-
-        granule = LandsatL2C2Granule(
-            filename=directory,
-            products_directory=self.products_directory,
-            preview_quality=self.preview_quality
-        )
+            granule = LandsatL2C2Granule(
+                filename=directory,
+                products_directory=self.products_directory,
+                preview_quality=self.preview_quality
+            )
+        else:
+            # S3 backend - create granule with S3 access
+            granule = LandsatL2C2Granule(
+                scene_id=granule_ID,
+                backend=self.backend,
+                products_directory=self.products_directory,
+                preview_quality=self.preview_quality,
+                bands=bands
+            )
 
         return granule
 
