@@ -42,7 +42,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-LandsatL2C2 = ["*.txt", "*.geojson"]
+LandsatL2C2 = ["*.geojson"]
 
 [project.urls]
 Homepage = "https://github.com/JPL-Evapotranspiration-Algorithms/LandsatL2C2"
@@ -50,3 +50,6 @@ Homepage = "https://github.com/JPL-Evapotranspiration-Algorithms/LandsatL2C2"
 [tool.setuptools.packages.find]
 include = ["LandsatL2C2"]
 exclude = ["calval", "testing"]
+
+[project.scripts]
+LandsatL2C2-credentials = "LandsatL2C2.M2M_credentials:main"

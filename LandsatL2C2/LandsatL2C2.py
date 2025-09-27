@@ -137,7 +137,7 @@ def parse_landsat_ID(landsat_id):
 
     return {
         "sensor": sensor,
-        "satellite": satellite,
+        "satellite": satellite, 
         "tile": pathrow,
         "path": path,
         "row": row,
