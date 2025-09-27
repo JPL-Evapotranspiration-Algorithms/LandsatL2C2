@@ -47,9 +47,10 @@ Base installation:
 pip install LandsatL2C2
 ```
 
-With S3 support (recommended):
 ```bash
-pip install LandsatL2C2[s3]
+pip install LandsatL2C2
 ```
+
+S3 backend dependencies are included by default.
 
 See [BACKEND_MIGRATION.md](BACKEND_MIGRATION.md) for detailed migration guide and examples.

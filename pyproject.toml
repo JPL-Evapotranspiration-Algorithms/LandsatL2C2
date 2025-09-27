@@ -15,11 +15,14 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "boto3",
     "colored-logging",
     "geopandas",
     "matplotlib",
     "pandas",
+    "planetary-computer",
     "pyproj",
+    "pystac-client",
     "python-dateutil",
     "rasterio",
     "rasters",
@@ -36,10 +39,6 @@ dev = [
     "jupyter",
     "pytest",
     "twine"
-]
-s3 = [
-    "boto3",
-    "pystac-client"
 ]
 
 [tool.setuptools.package-data]

@@ -53,14 +53,7 @@ landsat = LandsatL2C2(backend="auto")  # Default behavior
 pip install LandsatL2C2
 ```
 
-### With S3 Support
-```bash
-pip install LandsatL2C2[s3]
-```
-
-This installs additional dependencies:
-- `boto3` - AWS SDK for Python
-- `pystac-client` - STAC catalog client
+S3 backend dependencies (`boto3` and `pystac-client`) are now included by default.
 
 ## Migration from Previous Versions
 

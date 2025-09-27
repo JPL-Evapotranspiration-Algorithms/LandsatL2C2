@@ -17,7 +17,7 @@ import geopandas as gpd
 from dateutil import parser
 from shapely.geometry import Point, Polygon, shape
 
-# Optional imports for S3 backend
+# S3 backend imports (required dependencies)
 try:
     import boto3
     import pystac_client
@@ -25,12 +25,15 @@ try:
     from botocore import UNSIGNED
     from botocore.config import Config
     from rasterio.session import AWSSession
+    import planetary_computer
     HAS_S3_DEPS = True
-except ImportError:
-    HAS_S3_DEPS = False
-    boto3 = None
-    pystac_client = None
-    rasterio = None
+except ImportError as e:
+    # This should not happen with proper installation
+    raise ImportError(
+        f"S3 backend dependencies missing: {e}. "
+        "Please reinstall LandsatL2C2 or install missing dependencies: "
+        "pip install boto3 pystac-client rasterio planetary-computer"
+    )
 
 from .EEAPI import EEAPI
 
@@ -189,34 +192,34 @@ class S3Backend(LandsatBackend):
     """S3 anonymous access backend for Landsat Collection 2"""
     
     def __init__(self):
-        if not HAS_S3_DEPS:
-            raise ImportError(
-                "S3 backend requires additional dependencies. Install with: "
-                "pip install LandsatL2C2[s3]"
-            )
         
         # Anonymous S3 client
         self.s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
         self.bucket = 'usgs-landsat'
         
-        # STAC catalog for metadata search
+        # STAC catalog for metadata search - use Microsoft Planetary Computer for public access
         try:
             self.stac_catalog = pystac_client.Client.open(
-                "https://landsatlook.usgs.gov/stac-server"
+                "https://planetarycomputer.microsoft.com/api/stac/v1"
             )
+            logger.info("Connected to Microsoft Planetary Computer STAC catalog")
         except Exception as e:
-            logger.warning(f"Could not connect to STAC catalog: {e}")
-            # Fallback to Microsoft Planetary Computer
+            logger.warning(f"Could not connect to Planetary Computer STAC catalog: {e}")
+            # Fallback to USGS (requires authentication)
             try:
                 self.stac_catalog = pystac_client.Client.open(
-                    "https://planetarycomputer.microsoft.com/api/stac/v1"
+                    "https://landsatlook.usgs.gov/stac-server"
                 )
+                logger.warning("Using USGS STAC catalog - data access may require authentication")
             except Exception as e2:
                 logger.error(f"Could not connect to any STAC catalog: {e2}")
                 self.stac_catalog = None
         
         # AWS session for rasterio
         self.aws_session = AWSSession(boto3.Session(), requester_pays=False)
+        
+        # Cache for STAC assets
+        self._stac_assets_cache = {}
     
     def scene_search(
         self,
@@ -232,34 +235,67 @@ class S3Backend(LandsatBackend):
         if self.stac_catalog is None:
             raise RuntimeError("No STAC catalog available for search")
         
-        # Parse dates
+        # Parse dates and ensure proper formatting
         if isinstance(start_date, str):
             start_date = parser.parse(start_date).date()
+        elif isinstance(start_date, datetime):
+            start_date = start_date.date()
+            
         if end_date is None:
             end_date = start_date
-        if isinstance(end_date, str):
+        elif isinstance(end_date, str):
             end_date = parser.parse(end_date).date()
+        elif isinstance(end_date, datetime):
+            end_date = end_date.date()
         
-        # Default to Landsat Collection 2
+        # Default to Landsat Collection 2 - Planetary Computer has combined collection
         if collections is None:
-            collections = ["landsat-c2l2-sr"]
+            collections = ["landsat-c2-l2"]
+        
+        # Format dates as ISO strings for STAC
+        start_iso = start_date.isoformat()
+        end_iso = end_date.isoformat()
         
         # Build search parameters
         search_params = {
             "collections": collections,
-            "datetime": f"{start_date}/{end_date}",
+            "datetime": f"{start_iso}/{end_iso}",
             "limit": max_results or 1000
         }
         
         # Add spatial filter if provided
         if target_geometry is not None:
-            if isinstance(target_geometry, (Point, Polygon)):
-                search_params["intersects"] = target_geometry
+            try:
+                if hasattr(target_geometry, '__geo_interface__'):
+                    search_params["intersects"] = target_geometry.__geo_interface__
+                elif isinstance(target_geometry, dict):
+                    search_params["intersects"] = target_geometry
+                elif isinstance(target_geometry, (Point, Polygon)):
+                    # Convert to GeoJSON-like dict
+                    search_params["intersects"] = target_geometry.__geo_interface__
+                else:
+                    logger.warning(f"Unknown geometry type: {type(target_geometry)}")
+            except Exception as e:
+                logger.warning(f"Could not convert geometry for STAC search: {e}")
+                # Continue without spatial filter
         
         try:
             # Search STAC catalog
+            logger.info(f"STAC search params: {search_params}")
             search = self.stac_catalog.search(**search_params)
-            items = list(search.get_items())
+            
+            # Use a reasonable limit to avoid hanging
+            items = []
+            count = 0
+            max_items = search_params.get("limit", 1000)
+            
+            for item in search.items():
+                items.append(item)
+                count += 1
+                if count >= max_items:
+                    break
+                    
+            logger.info(f"Retrieved {len(items)} items from STAC catalog")
             
             # Convert to DataFrame
             results = []
@@ -268,8 +304,22 @@ class S3Backend(LandsatBackend):
                 cloud_cover = item.properties.get('eo:cloud_cover', 0)
                 
                 if cloud_cover <= cloud_percent_max:
+                    # Handle datetime parsing - item.datetime might be string or datetime
+                    try:
+                        if isinstance(item.datetime, str):
+                            date_utc = parser.parse(item.datetime).date()
+                        else:
+                            # Assume it's already a datetime-like object
+                            date_utc = item.datetime.date()
+                    except Exception as e:
+                        logger.warning(f"Could not parse datetime for item {item.id}: {e}")
+                        continue
+                        
+                    # Cache the assets for this scene
+                    self._stac_assets_cache[item.id] = item.assets
+                    
                     results.append({
-                        'date_UTC': parser.parse(item.datetime).date(),
+                        'date_UTC': date_utc,
                         'display_ID': item.id,
                         'entity_ID': item.id,
                         'cloud': cloud_cover,
@@ -321,13 +371,110 @@ class S3Backend(LandsatBackend):
         return self._get_s3_scene_path(scene_id)
     
     def get_band_data(self, scene_id: str, band_name: str):
-        """Get band data as rasterio dataset from S3"""
-        url = self.get_band_url(scene_id, band_name)
+        """Get band data as rasterio dataset using STAC assets"""
+        # First try to get URL from STAC assets
+        url = self._get_band_url_from_stac(scene_id, band_name)
+        
+        if not url:
+            # Fallback to constructed S3 URL
+            url = self.get_band_url(scene_id, band_name)
+            logger.info(f"Using constructed S3 URL: {url}")
+        else:
+            logger.info(f"Using STAC asset URL: {url}")
+            
+            # Sign URL if it's from Microsoft Planetary Computer
+            if "blob.core.windows.net" in url and planetary_computer is not None:
+                try:
+                    signed_url = planetary_computer.sign(url)
+                    logger.info(f"Signed URL for Planetary Computer access")
+                    url = signed_url
+                except Exception as e:
+                    logger.warning(f"Could not sign URL: {e}")
         
         # Use rasterio with AWS session for anonymous access
-        with rasterio.Env(self.aws_session):
-            return rasterio.open(url)
+        try:
+            with rasterio.Env(self.aws_session):
+                return rasterio.open(url)
+        except Exception as e:
+            logger.error(f"Failed to load band {band_name} from URL {url}: {e}")
+            raise
     
+    def _get_band_url_from_stac(self, scene_id: str, band_name: str) -> Optional[str]:
+        """Get band URL from cached STAC assets"""
+        logger.info(f"Searching STAC assets for scene {scene_id}, band {band_name}")
+        
+        # Map band names to STAC asset keys (Planetary Computer format)
+        band_mapping = {
+            'SR_B1': 'coastal',   # Coastal/aerosol band
+            'SR_B2': 'blue', 
+            'SR_B3': 'green',
+            'SR_B4': 'red',
+            'SR_B5': 'nir08',
+            'SR_B6': 'swir16',
+            'SR_B7': 'swir22',
+            'ST_B10': 'lwir11',   # Thermal band in Planetary Computer (corrected)
+            'QA_PIXEL': 'qa_pixel',
+            'QA_RADSAT': 'qa_radsat',
+            'SR_QA_AEROSOL': 'qa_aerosol',  # Corrected name in Planetary Computer
+            'mtl.txt': 'mtl.txt',   # MTL metadata file
+            'mtl.xml': 'mtl.xml',   # MTL metadata file (XML format)
+            'mtl.json': 'mtl.json'  # MTL metadata file (JSON format)
+        }
+        
+        asset_key = band_mapping.get(band_name)
+        if not asset_key:
+            logger.warning(f"No STAC asset mapping for band {band_name}")
+            return None
+        
+        # Check if we have the scene cached and if it has the specific asset
+        assets = self._stac_assets_cache.get(scene_id, {})
+        
+        if asset_key in assets:
+            logger.info(f"Found STAC asset {asset_key} for scene {scene_id}")
+            return assets[asset_key].href
+        else:
+            logger.warning(f"Asset {asset_key} not found for scene {scene_id}")
+            logger.info(f"Available assets for {scene_id}: {list(assets.keys())}")
+            return None
+        
+    def _search_and_cache_st_product(self, scene_id: str):
+        """Search for and cache ST product assets for a given scene"""
+        if self.stac_catalog is None:
+            logger.warning("No STAC catalog available")
+            return
+            
+        try:
+            # Convert scene ID to ST product ID (replace _SR with _ST)
+            st_scene_id = scene_id.replace('_SR', '_ST')
+            logger.info(f"Searching for ST product: {st_scene_id}")
+            
+            # Search for the ST product
+            search = self.stac_catalog.search(
+                collections=["landsat-c2l2-st"],
+                ids=[st_scene_id],
+                limit=1
+            )
+            items = list(search.items())
+            
+            if items:
+                item = items[0]
+                logger.info(f"Found ST product: {item.id}, assets: {list(item.assets.keys())}")
+                # Merge ST assets with existing cached assets (if any)
+                if scene_id in self._stac_assets_cache:
+                    # Update existing assets with ST assets
+                    for key, asset in item.assets.items():
+                        self._stac_assets_cache[scene_id][key] = asset
+                else:
+                    # Cache ST assets under the original scene_id
+                    self._stac_assets_cache[scene_id] = item.assets
+                    
+                logger.info(f"Cached ST product assets for scene {scene_id}")
+            else:
+                logger.warning(f"No ST product found for scene ID: {st_scene_id}")
+                
+        except Exception as e:
+            logger.warning(f"Could not find ST product for scene {scene_id}: {e}")
+
     def get_band_url(self, scene_id: str, band_name: str) -> str:
         """Get S3 URL for a specific band"""
         s3_path = self._get_s3_band_path(scene_id, band_name)
@@ -381,33 +528,23 @@ def create_backend(backend_type: str = "auto", **kwargs) -> LandsatBackend:
     if backend_type == "m2m":
         return M2MBackend(**kwargs)
     elif backend_type == "s3":
-        if not HAS_S3_DEPS:
-            raise ImportError(
-                "S3 backend requires additional dependencies. Install with: "
-                "pip install LandsatL2C2[s3]"
-            )
         return S3Backend()
     elif backend_type == "auto":
-        # Try S3 first (no credentials required)
-        if HAS_S3_DEPS:
-            try:
-                backend = S3Backend()
-                # Test connection
-                if backend.stac_catalog is not None:
-                    logger.info("Using S3 backend")
-                    return backend
-            except Exception as e:
-                logger.warning(f"S3 backend failed: {e}")
-        else:
-            logger.info("S3 dependencies not available, skipping S3 backend")
-        
-        # Fall back to M2M
+        # Use S3 backend by default (no credentials required)
         try:
-            backend = M2MBackend(**kwargs)
-            logger.info("Using M2M backend")
+            backend = S3Backend()
+            logger.info("Using S3 backend")
             return backend
         except Exception as e:
-            logger.error(f"M2M backend failed: {e}")
-            raise RuntimeError("No backend available")
+            logger.error(f"S3 backend failed: {e}")
+            # Only fall back to M2M if explicitly needed or if S3 fails
+            logger.warning("Falling back to M2M backend (requires credentials)")
+            try:
+                backend = M2MBackend(**kwargs)
+                logger.info("Using M2M backend")
+                return backend
+            except Exception as e:
+                logger.error(f"M2M backend failed: {e}")
+                raise RuntimeError("No backend available")
     else:
         raise ValueError(f"Unknown backend type: {backend_type}")
